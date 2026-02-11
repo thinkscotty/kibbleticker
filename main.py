@@ -15,6 +15,10 @@ except ImportError:
     from random import getrandbits
 
 import config
+from menu import (
+    load_settings, init_i2c, init_oled, open_settings_menu,
+    read_key, COLOR_MAP, BRIGHTNESS_MAP, CARDKB_ADDR,
+)
 
 # ---------------------------------------------------------------------------
 # 5x8 Bitmap Font (Adafruit GFX / glcdfont)
@@ -224,13 +228,9 @@ FONT_SMALL_DATA = bytes([
     0x04, 0x06, 0x02,  # '~'
 ])
 
-# Select active font based on config
-if getattr(config, 'FONT_SIZE', 'large') == 'small':
-    _FONT = FONT_SMALL_DATA
-    _FONT_WIDTH = 3
-else:
-    _FONT = FONT_DATA
-    _FONT_WIDTH = 5
+# Active font (set by apply_settings)
+_FONT = FONT_DATA
+_FONT_WIDTH = 5
 
 # ---------------------------------------------------------------------------
 # NeoPixel Initialization
@@ -238,11 +238,10 @@ else:
 pin = machine.Pin(config.NEOPIXEL_PIN, machine.Pin.OUT)
 np = neopixel.NeoPixel(pin, config.NUM_LEDS)
 
-# Pre-compute brightness-scaled color
-_r, _g, _b = config.TEXT_COLOR
-_f = config.BRIGHTNESS / 255
-COLOR = (int(_r * _f), int(_g * _f), int(_b * _f))
+# Color and scroll delay (set by apply_settings at boot)
+COLOR = (15, 15, 15)
 OFF = (0, 0, 0)
+scroll_delay = config.SCROLL_DELAY_MS
 
 # ---------------------------------------------------------------------------
 # Pixel Mapping — Vertical Serpentine
@@ -262,6 +261,12 @@ for _col in range(config.MATRIX_WIDTH):
 # WiFi interface (module-level for reconnection checks)
 wlan = network.WLAN(network.STA_IF)
 
+# I2C / peripheral state (set during main() init)
+i2c = None
+has_cardkb = False
+has_oled = False
+oled = None
+
 # ---------------------------------------------------------------------------
 # Display Functions
 # ---------------------------------------------------------------------------
@@ -272,9 +277,7 @@ def clear_display():
 
 
 def text_to_columns(text):
-    """Convert a string to a list of column byte values using the active font.
-    Each element is an integer where each bit = a row (bit 0 = top).
-    """
+    """Convert a string to a list of column byte values using the active font."""
     fw = _FONT_WIDTH
     font = _FONT
     num_chars = len(font) // fw
@@ -327,10 +330,59 @@ def show_status(message):
     np.write()
 
 # ---------------------------------------------------------------------------
+# Settings Application
+# ---------------------------------------------------------------------------
+
+def apply_settings(settings):
+    """Apply user settings to runtime state (color, brightness, font, scroll speed)."""
+    global COLOR, _FONT, _FONT_WIDTH, scroll_delay
+
+    color_name = settings.get("text_color", "white")
+    base_rgb = COLOR_MAP.get(color_name, (255, 255, 255))
+
+    brightness_level = settings.get("brightness", 3)
+    if 0 <= brightness_level <= 10:
+        brightness_value = BRIGHTNESS_MAP[brightness_level]
+    else:
+        brightness_value = BRIGHTNESS_MAP[3]
+
+    factor = brightness_value / 255
+    COLOR = (int(base_rgb[0] * factor), int(base_rgb[1] * factor), int(base_rgb[2] * factor))
+
+    font_size = settings.get("font_size", "large")
+    if font_size == "small":
+        _FONT = FONT_SMALL_DATA
+        _FONT_WIDTH = 3
+    else:
+        _FONT = FONT_DATA
+        _FONT_WIDTH = 5
+
+    delay = settings.get("scroll_delay", config.SCROLL_DELAY_MS)
+    if isinstance(delay, int) and 5 <= delay <= 500:
+        scroll_delay = delay
+    else:
+        scroll_delay = config.SCROLL_DELAY_MS
+
+
+def get_effective_config(settings):
+    """Build effective WiFi/API config from settings + config.py fallbacks."""
+    ssid = settings["wifi_ssid"] if settings.get("wifi_ssid") else config.WIFI_SSID
+    password = settings["wifi_password"] if settings.get("wifi_password") else config.WIFI_PASSWORD
+    api_key = settings["api_key"] if settings.get("api_key") else config.API_KEY
+
+    base_url = config.API_BASE_URL.rstrip("/")
+    if settings.get("api_source") == "all":
+        api_url = base_url + "/api/v1/facts/all"
+    else:
+        api_url = base_url + "/api/v1/facts/recent"
+
+    return ssid, password, api_key, api_url
+
+# ---------------------------------------------------------------------------
 # WiFi
 # ---------------------------------------------------------------------------
 
-def connect_wifi():
+def connect_wifi(ssid, password):
     """Connect to WiFi. Shows status on display. Returns True if connected."""
     wlan.active(True)
 
@@ -338,10 +390,17 @@ def connect_wifi():
         return True
 
     show_status("WiFi")
-    wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
+    wlan.connect(ssid, password)
 
     retries = 0
     while not wlan.isconnected() and retries < config.WIFI_MAX_RETRIES:
+        # Allow CardKB to interrupt WiFi retry for settings access
+        if has_cardkb and i2c:
+            try:
+                if i2c.readfrom(CARDKB_ADDR, 1)[0] != 0:
+                    return False  # Signal caller to open settings
+            except OSError:
+                pass
         time.sleep_ms(config.WIFI_RETRY_DELAY_MS)
         retries += 1
 
@@ -356,16 +415,16 @@ def connect_wifi():
 # API Client
 # ---------------------------------------------------------------------------
 
-def fetch_facts():
+def fetch_facts(api_url, api_key):
     """Fetch facts from the Kibble API. Returns list of fact strings, or None."""
     try:
         gc.collect()
         headers = {
-            "Authorization": "Bearer " + config.API_KEY,
+            "Authorization": "Bearer " + api_key,
             "Accept": "application/json"
         }
         show_status("Load")
-        response = urequests.get(config.API_URL, headers=headers)
+        response = urequests.get(api_url, headers=headers)
 
         if response.status_code == 200:
             data = response.json()
@@ -408,34 +467,107 @@ def shuffle_list(lst):
 # ---------------------------------------------------------------------------
 
 def scroll_fact(text):
-    """Scroll a single fact across the display from right to left."""
+    """Scroll a single fact across the display. Returns True if a key was pressed."""
     columns = text_to_columns(text)
 
     for offset in range(-config.MATRIX_WIDTH, len(columns)):
         render_frame(columns, offset, COLOR)
-        time.sleep_ms(config.SCROLL_DELAY_MS)
+
+        # Poll CardKB for key press (enter settings)
+        if has_cardkb and i2c:
+            try:
+                if i2c.readfrom(CARDKB_ADDR, 1)[0] != 0:
+                    return True
+            except OSError:
+                pass
+
+        time.sleep_ms(scroll_delay)
+
+    return False
 
 # ---------------------------------------------------------------------------
 # Main Application
 # ---------------------------------------------------------------------------
 
+def _enter_settings(settings):
+    """Open settings menu, apply changes, return updated effective config.
+    Returns (settings_changed, new_ssid, new_password, new_api_key, new_api_url).
+    """
+    clear_display()
+    pre_wifi = (settings.get("wifi_ssid", ""), settings.get("wifi_password", ""))
+    pre_api = (settings.get("api_key", ""), settings.get("api_source", "recent"))
+
+    changed = open_settings_menu(oled, i2c, settings)
+
+    if changed:
+        apply_settings(settings)
+
+    post_wifi = (settings.get("wifi_ssid", ""), settings.get("wifi_password", ""))
+    post_api = (settings.get("api_key", ""), settings.get("api_source", "recent"))
+
+    wifi_changed = pre_wifi != post_wifi
+    api_changed = pre_api != post_api
+
+    ssid, password, api_key, api_url = get_effective_config(settings)
+    return changed, wifi_changed, api_changed, ssid, password, api_key, api_url
+
+
 def main():
+    global i2c, has_cardkb, has_oled, oled
+
     clear_display()
 
-    # Connect to WiFi (retry until success)
-    while not connect_wifi():
+    # Load persisted settings
+    settings = load_settings()
+
+    # Initialize I2C peripherals
+    i2c, has_cardkb, has_oled = init_i2c()
+    if has_oled and i2c:
+        oled = init_oled(i2c)
+        if oled is None:
+            has_oled = False
+
+    # Apply visual settings
+    apply_settings(settings)
+
+    # Build effective config
+    ssid, password, api_key, api_url = get_effective_config(settings)
+
+    # Connect to WiFi (retry until success, allow settings access)
+    while not connect_wifi(ssid, password):
         show_status("NoWiFi")
+
+        # Check for key press to open settings during WiFi failure
+        if has_cardkb and has_oled and oled and i2c:
+            key = read_key(i2c)
+            if key != 0:
+                _, wifi_changed, api_changed, ssid, password, api_key, api_url = _enter_settings(settings)
+                continue
+
         time.sleep_ms(config.WIFI_RETRY_DELAY_MS * 2)
 
     # Fetch initial facts (retry until success)
     facts = None
     while facts is None:
-        facts = fetch_facts()
+        facts = fetch_facts(api_url, api_key)
         if facts is None:
             show_status("NoAPI")
+
+            # Check for key press to open settings during API failure
+            if has_cardkb and has_oled and oled and i2c:
+                key = read_key(i2c)
+                if key != 0:
+                    changed, wifi_changed, api_changed, ssid, password, api_key, api_url = _enter_settings(settings)
+                    if wifi_changed:
+                        wlan.disconnect()
+                        while not connect_wifi(ssid, password):
+                            show_status("NoWiFi")
+                            time.sleep_ms(config.WIFI_RETRY_DELAY_MS * 2)
+                    continue
+
             time.sleep_ms(config.API_RETRY_DELAY_MS)
             if not wlan.isconnected():
-                while not connect_wifi():
+                while not connect_wifi(ssid, password):
                     time.sleep_ms(config.WIFI_RETRY_DELAY_MS * 2)
 
     # Main display loop
@@ -448,11 +580,11 @@ def main():
             # Check hourly refresh
             elapsed = time.ticks_diff(time.ticks_ms(), last_refresh)
             if elapsed >= config.FACT_REFRESH_INTERVAL_MS:
-                new_facts = fetch_facts()
+                new_facts = fetch_facts(api_url, api_key)
                 if new_facts is not None:
                     facts = new_facts
                     last_refresh = time.ticks_ms()
-                    break  # Re-shuffle with new facts
+                    break
                 else:
                     last_refresh = time.ticks_ms()
 
@@ -460,10 +592,25 @@ def main():
             if not wlan.isconnected():
                 show_status("WiFi?")
                 time.sleep_ms(2000)
-                if not connect_wifi():
+                if not connect_wifi(ssid, password):
                     continue
 
-            scroll_fact(fact)
+            # Scroll fact and check for key press
+            key_pressed = scroll_fact(fact)
+            if key_pressed and has_oled and oled:
+                _, wifi_changed, api_changed, ssid, password, api_key, api_url = _enter_settings(settings)
+                if wifi_changed:
+                    wlan.disconnect()
+                    while not connect_wifi(ssid, password):
+                        show_status("NoWiFi")
+                        time.sleep_ms(config.WIFI_RETRY_DELAY_MS * 2)
+                if api_changed:
+                    new_facts = fetch_facts(api_url, api_key)
+                    if new_facts is not None:
+                        facts = new_facts
+                        last_refresh = time.ticks_ms()
+                        break
+
             gc.collect()
 
 

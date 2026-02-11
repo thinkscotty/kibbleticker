@@ -4,6 +4,8 @@ A smart LED ticker board that scrolls facts from a self-hosted [Kibble](https://
 
 Interesting topics are entered by users through the Kibble web interface. Then Kibble utilizes free AI to source facts and summarize them to the user's specification. The facts are fetched over WiFi by the board, and displayed in a randomized scrolling loop that refreshes every hour.
 
+An optional OLED display and mini keyboard allow on-device configuration of WiFi, API, text color, brightness, and font size — no computer required after initial setup.
+
 ## Hardware
 
 ### Bill of Materials
@@ -14,9 +16,11 @@ Interesting topics are entered by users through the Kibble web interface. Then K
 | 8x32 WS2812B NeoPixel Matrix | BTF-LIGHTING WS2812B ECO RGB (or equivalent) | Must be **vertical serpentine** wiring layout, 5V, 256 LEDs total |
 | 3.3V to 5V Logic Level Shifter | Bidirectional level shifter | Needed because ESP32 GPIO is 3.3V but WS2812B data line expects 5V |
 | 5V USB-C Power Supply | High amperage (3A+ recommended) | 256 LEDs at full white draw ~15A; at low brightness 3A is sufficient |
-| Jumper Wires | Male-to-female or as needed | 3 wires minimum: data, power, ground |
+| M5Stack CardKB | I2C mini QWERTY keyboard | *Optional* — enables on-device settings menu |
+| SSD1306 0.96" OLED Display | 128x64 I2C OLED (bicolor yellow/blue recommended) | *Optional* — displays the settings menu |
+| Jumper Wires | Male-to-female or as needed | See wiring diagrams below |
 
-### Wiring
+### NeoPixel Matrix Wiring
 
 ```
 ESP32-S3              Level Shifter           NeoPixel Matrix
@@ -36,6 +40,25 @@ GND      ──────────>  GND        ─────────
 - Power the NeoPixel matrix directly from the 5V power supply, **not** through the ESP32's 5V pin (the current draw is too high).
 - The level shifter converts the 3.3V data signal from GPIO 16 to the 5V expected by the WS2812B LEDs.
 - If you use a different GPIO pin, update `NEOPIXEL_PIN` in `config.py`.
+
+### I2C Wiring (CardKB + OLED)
+
+Both the CardKB and the SSD1306 OLED share the same I2C bus (they have different addresses). Connect them in parallel:
+
+```
+ESP32-S3              CardKB (0x5F)          SSD1306 OLED (0x3C)
+---------             ---------------        -------------------
+GPIO 8 (SDA) ────────>  SDA  ──────────────>  SDA
+GPIO 9 (SCL) ────────>  SCL  ──────────────>  SCL
+3.3V         ────────>  VCC  ──────────────>  VCC
+GND          ────────>  GND  ──────────────>  GND
+```
+
+**Notes:**
+
+- Both devices run on 3.3V from the ESP32-S3. No level shifter needed for I2C.
+- If you use different I2C pins, update `I2C_SDA_PIN` and `I2C_SCL_PIN` in `config.py`.
+- The CardKB and OLED are optional. The board works as a scroll-only ticker without them.
 
 ### Matrix Wiring Layout
 
@@ -74,14 +97,14 @@ Even columns run top-to-bottom, odd columns run bottom-to-top. The code handles 
 6. Select the correct USB port, choose the downloaded `.bin` firmware file, and click **Install**
 7. Wait for the flash to complete, then close the dialog
 
-### Step 2: Install the `urequests` Library
+### Step 2: Install Libraries
 
-The board needs the `urequests` library to make HTTP requests to your Kibble API.
+The board needs two libraries. Install both via Thonny:
 
 1. In Thonny, ensure the ESP32-S3 is connected (you should see the MicroPython REPL at the bottom)
 2. Go to **Tools > Manage packages...**
-3. Search for `micropython-urequests`
-4. Click **Install** to install it to the ESP32-S3
+3. Search for `micropython-urequests` and click **Install**
+4. Search for `micropython-ssd1306` and click **Install** *(only needed if using the OLED display)*
 5. Close the package manager
 
 ### Step 3: Configure the Board
@@ -94,27 +117,26 @@ WIFI_SSID = "YourNetworkName"
 WIFI_PASSWORD = "YourPassword"
 
 # API Configuration — point to your self-hosted Kibble instance
-API_URL = "https://your-kibble-instance.com/api/v1/facts/recent"
+API_BASE_URL = "https://your-kibble-instance.com"
 API_KEY = "your-api-key-here"
 ```
 
-**`API_URL`** should point to your Kibble instance's recent facts endpoint. The format is:
-```
-https://<your-kibble-domain>/api/v1/facts/recent
-```
+**`API_BASE_URL`** should be the base URL of your Kibble instance (just the domain, no path). The board automatically appends the correct API path.
 
 **`API_KEY`** is the Bearer token for API authentication. You can generate one from your Kibble instance's admin panel.
 
 See the [Configuration Reference](#configuration-reference) section below for all available settings.
 
+**Note:** If you have a CardKB and OLED connected, you can skip editing `config.py` entirely and configure WiFi, API key, and display settings directly through the on-device settings menu.
+
 ### Step 4: Upload Files to the ESP32-S3
 
 1. In Thonny, make sure the ESP32-S3 is connected
-2. Open `config.py` in Thonny (File > Open > This computer, navigate to the file)
-3. Save it to the ESP32: **File > Save as...** > select **MicroPython device** > name it `config.py` > Save
-4. Open `main.py` in Thonny
-5. Save it to the ESP32: **File > Save as...** > select **MicroPython device** > name it `main.py` > Save
-6. Press the **Stop/Restart** button (or Ctrl+D) to soft-reboot the ESP32
+2. Upload each of these files to the ESP32 by opening them in Thonny (File > Open > This computer), then saving to the device (File > Save as... > select **MicroPython device**):
+   - `config.py`
+   - `menu.py`
+   - `main.py`
+3. Press the **Stop/Restart** button (or Ctrl+D) to soft-reboot the ESP32
 
 The board will immediately begin running. You should see status messages on the matrix:
 - **"WiFi"** — Connecting to WiFi
@@ -126,64 +148,109 @@ The board will immediately begin running. You should see status messages on the 
 While the board is running, the Thonny REPL will show diagnostic output:
 
 ```
+CardKB detected at 0x5F
+OLED detected at 0x3C
 WiFi connected: ('192.168.1.100', '255.255.255.0', '192.168.1.1', '8.8.8.8')
 Fetched 47 facts
 ```
 
 If something goes wrong, error messages will appear here.
 
+## Settings Menu
+
+If you have a CardKB and SSD1306 OLED connected, you can configure the board without a computer.
+
+### Opening the Menu
+
+Press **any key** on the CardKB while facts are scrolling. The OLED display will turn on and show the settings menu. The ticker pauses while the menu is active.
+
+After **30 seconds** of inactivity, the OLED turns off and the ticker resumes automatically. You can also press **ESC** to close the menu immediately.
+
+### Navigation
+
+| Key | Action |
+|-----|--------|
+| **LEFT / RIGHT** | Switch between the 5 settings screens |
+| **UP / DOWN** | Move cursor between options on the current screen |
+| **ENTER** | Select the highlighted option |
+| **ESC** | Close the settings menu |
+
+### Settings Screens
+
+**Screen 1: Data Source** — Choose which facts the board displays:
+- **Most Recent Facts** — The 100 most recent facts from each topic (default)
+- **All Active Facts** — Every non-archived fact from all topics
+
+**Screen 2: WiFi & API** — Edit connection settings:
+- **WiFi SSID** — Your WiFi network name
+- **WiFi Password** — Your WiFi password
+- **API Key** — Your Kibble API Bearer token
+
+Press ENTER on a field to edit it. Type the new value using the CardKB, then press ENTER to confirm. A confirmation dialog ("ARE YOU SURE?") will appear — select YES to save or NO to discard.
+
+**Screen 3: Text Color** — Choose the scrolling text color:
+- White (default), Blue, Green, Yellow, Orange, Red, Pink, Purple
+
+**Screen 4: Brightness** — Adjust LED brightness:
+- Scale of 0 (dimmest) to 10 (brightest), default 3
+
+**Screen 5: Font Size** — Choose the text size:
+- **Large** — 5x8 font, ~5 characters visible at once (default)
+- **Small** — 3x5 font, ~8 characters visible at once
+
+All settings are saved to the device and persist across reboots.
+
 ## Configuration Reference
 
-All settings are in `config.py`:
+Hardware and timing settings are in `config.py`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `WIFI_SSID` | `"YOUR_WIFI_NETWORK"` | Your WiFi network name |
 | `WIFI_PASSWORD` | `"YOUR_WIFI_PASSWORD"` | Your WiFi password |
-| `API_URL` | `"YOUR_KIBBLE_URL"` | Full URL to your Kibble API's recent facts endpoint |
+| `API_BASE_URL` | `"YOUR_KIBBLE_URL"` | Base URL of your Kibble instance (e.g. `https://your-domain.com`) |
 | `API_KEY` | `"YOUR_KIBBLE_API"` | API key (Bearer token) for authentication |
 | `NEOPIXEL_PIN` | `16` | GPIO pin connected to the NeoPixel data line |
 | `MATRIX_WIDTH` | `32` | Number of columns on the matrix |
 | `MATRIX_HEIGHT` | `8` | Number of rows on the matrix |
 | `NUM_LEDS` | `256` | Total number of LEDs (width x height) |
-| `TEXT_COLOR` | `(255, 0, 0)` | RGB color tuple for the text (default: red) |
-| `BRIGHTNESS` | `15` | Brightness level, 0-255 (keep low to reduce power draw) |
+| `I2C_SDA_PIN` | `8` | GPIO pin for I2C data (SDA) |
+| `I2C_SCL_PIN` | `9` | GPIO pin for I2C clock (SCL) |
 | `SCROLL_DELAY_MS` | `80` | Milliseconds between scroll frames (lower = faster) |
 | `CHAR_SPACING` | `1` | Blank pixel columns between characters |
-| `FONT_SIZE` | `"small"` | `"small"` (3x5 Tom Thumb) or `"large"` (5x8 Adafruit GFX) |
 | `FACT_REFRESH_INTERVAL_MS` | `3600000` | How often to fetch new facts (default: 1 hour) |
 | `WIFI_RETRY_DELAY_MS` | `5000` | Delay between WiFi connection retries |
 | `WIFI_MAX_RETRIES` | `20` | Maximum WiFi connection attempts before giving up |
 | `API_RETRY_DELAY_MS` | `10000` | Delay between API fetch retries |
 
-### Color Examples
+Display settings (text color, brightness, font size, and API data source) are managed through the on-device settings menu and saved to `settings.json`. They can also be configured by manually creating a `settings.json` file on the device:
 
-The `TEXT_COLOR` setting uses an RGB tuple `(Red, Green, Blue)` with values from 0-255:
-
-| Color | Value |
-|-------|-------|
-| Red | `(255, 0, 0)` |
-| Green | `(0, 255, 0)` |
-| Blue | `(0, 0, 255)` |
-| White | `(255, 255, 255)` |
-| Yellow | `(255, 255, 0)` |
-| Cyan | `(0, 255, 255)` |
-| Purple | `(128, 0, 255)` |
-| Orange | `(255, 128, 0)` |
+```json
+{
+  "api_source": "recent",
+  "wifi_ssid": "",
+  "wifi_password": "",
+  "api_key": "",
+  "text_color": "white",
+  "brightness": 3,
+  "font_size": "large"
+}
+```
 
 ### Font Options
 
 Two font sizes are available:
 
-- **`"small"`** — Tom Thumb 3x5 font. Compact and readable. Fits ~8 characters on screen at once. Best for longer text that you want to keep visible longer.
 - **`"large"`** — Adafruit GFX 5x8 font. Uses the full height of the display. Fits ~5 characters on screen at once. Best for maximum readability at a distance.
+- **`"small"`** — Tom Thumb 3x5 font. Compact and readable. Fits ~8 characters on screen at once. Best for longer text that you want to keep visible longer.
 
 ## Kibble API
 
-This board is designed to work with a self-hosted [Kibble](https://github.com/scottypate/kibble) instance. The board calls the following endpoint:
+This board is designed to work with a self-hosted [Kibble](https://github.com/scottypate/kibble) instance. The board calls one of the following endpoints based on the Data Source setting:
 
 ```
-GET /api/v1/facts/recent
+GET /api/v1/facts/recent      (100 most recent facts per topic)
+GET /api/v1/facts/all          (all active facts from all topics)
 Authorization: Bearer <your-api-key>
 ```
 
@@ -233,38 +300,46 @@ The board shows short status messages on the matrix during startup and error con
 - Confirm the data wire is on the correct GPIO pin (default: GPIO 16)
 
 ### "NoWiFi" stays on screen
-- Double-check `WIFI_SSID` and `WIFI_PASSWORD` in `config.py`
+- Double-check `WIFI_SSID` and `WIFI_PASSWORD` in `config.py` (or use the settings menu to update them)
 - Make sure the WiFi network is 2.4 GHz (ESP32-S3 does not support 5 GHz)
 - Move the board closer to the WiFi router
 
 ### "NoAPI" stays on screen
-- Verify `API_URL` points to your Kibble instance's `/api/v1/facts/recent` endpoint
+- Verify `API_BASE_URL` points to your Kibble instance (e.g. `https://your-domain.com`)
 - Verify `API_KEY` is correct
 - Check that your Kibble instance is running and accessible from the board's network
 - Check the Thonny serial console for detailed error messages
+
+### Settings menu doesn't appear
+- Verify the CardKB and OLED are connected to GPIO 8 (SDA) and GPIO 9 (SCL)
+- Check that both devices share a common ground with the ESP32
+- Look for "CardKB detected" and "OLED detected" messages in the serial console at boot
+- Both the CardKB AND the OLED must be connected for the menu to work
 
 ### Text looks garbled or offset
 - Confirm your matrix uses a **vertical serpentine** wiring layout
 - If your matrix uses a different layout (horizontal serpentine, progressive, etc.), the pixel mapping in `main.py` will need to be modified
 
 ### LEDs are too bright or too dim
-- Adjust `BRIGHTNESS` in `config.py` (0-255, lower values recommended)
-- At `BRIGHTNESS = 15`, power draw is very low and the display is comfortable to read indoors
+- Use the settings menu to adjust brightness (0-10 scale)
+- Level 3 is the default; at this level power draw is low and the display is comfortable to read indoors
 
 ### Board resets frequently
 - This can happen if the power supply can't provide enough current
 - Use a 5V supply rated for at least 3A
-- Lower the `BRIGHTNESS` setting to reduce power draw
+- Lower the brightness setting to reduce power draw
 
 ## Project Structure
 
 ```
 kibble_board_prototype/
-  config.py   — User configuration (WiFi, API, display settings)
-  main.py     — Complete application (fonts, display, WiFi, API, scroll engine)
+  config.py        — Hardware configuration (WiFi, API, pins, timing)
+  menu.py          — Settings UI (OLED display, CardKB input, settings persistence)
+  main.py          — Main application (fonts, display, WiFi, API, scroll engine)
+  settings.json    — User settings (created automatically on first change)
 ```
 
-Both files must be uploaded to the root of the ESP32-S3's filesystem via Thonny.
+All `.py` files must be uploaded to the root of the ESP32-S3's filesystem via Thonny.
 
 ## License
 

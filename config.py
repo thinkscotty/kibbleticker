@@ -6,7 +6,7 @@ WIFI_SSID = "YOUR_WIFI_NETWORK"
 WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"
 
 # API Configuration
-API_URL = "YOUR_KIBBLE_URL"
+API_BASE_URL = "YOUR_KIBBLE_URL"  # Base URL only, e.g. "https://your-kibble-instance.com"
 API_KEY = "YOUR_KIBBLE_API"
 
 # Hardware Configuration
@@ -15,12 +15,13 @@ MATRIX_WIDTH = 32
 MATRIX_HEIGHT = 8
 NUM_LEDS = 256
 
+# I2C Configuration (for CardKB keyboard and SSD1306 OLED)
+I2C_SDA_PIN = 8
+I2C_SCL_PIN = 9
+
 # Display Configuration
-TEXT_COLOR = (255, 0, 0)
-BRIGHTNESS = 15
 SCROLL_DELAY_MS = 80
 CHAR_SPACING = 1
-FONT_SIZE = "small"  # "large" = 5x8, "small" = 3x5 (fits more text on screen)
 
 # Timing Configuration
 FACT_REFRESH_INTERVAL_MS = 3600000
