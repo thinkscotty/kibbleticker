@@ -2,7 +2,7 @@
 
 A smart LED ticker board that scrolls facts from a self-hosted [Kibble](https://github.com/scottypate/kibble) instance across an 8x32 NeoPixel matrix display. Built with MicroPython on an ESP32-S3.
 
-Facts are entered by users through the Kibble web interface, fetched over WiFi by the board, and displayed in a randomized scrolling loop that refreshes every hour.
+Interesting topics are entered by users through the Kibble web interface. Then Kibble utilizes free AI to source facts and summarize them to the user's specification. The facts are fetched over WiFi by the board, and displayed in a randomized scrolling loop that refreshes every hour.
 
 ## Hardware
 
